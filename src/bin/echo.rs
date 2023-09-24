@@ -32,8 +32,8 @@ impl Node<Payload> for EchoNode {
         let gossip_glomers::Event::Message(message) = event else {
             panic!("unexpected event: {:?}", event);
         };
-        let mut reply = message.clone().into_reply(Some(&mut self.id));
-        match message.body.payload {
+        let mut reply = message.into_reply(Some(&mut self.id));
+        match reply.body.payload {
             Payload::Echo { echo } => {
                 reply.body.payload = Payload::EchoOk { echo };
                 reply.send(output).context("send response message")?;
