@@ -17,7 +17,7 @@ struct EchoNode {
 }
 
 impl Node<Payload> for EchoNode {
-    fn from_init(init: Init) -> anyhow::Result<Self>
+    fn from_init(_init: Init) -> anyhow::Result<Self>
     where
         Self: Sized,
     {
