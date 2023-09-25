@@ -1,7 +1,7 @@
 use std::io::StdoutLock;
 
 use anyhow::{Context, Ok};
-use gossip_glomers::{event_loop, Init, Node};
+use gossip_glomers::{event_loop, Event, Init, Node};
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -21,7 +21,7 @@ struct UniqueIdsNode {
 }
 
 impl Node<Payload> for UniqueIdsNode {
-    fn from_init(init: Init) -> anyhow::Result<Self>
+    fn from_init(init: Init, _tx: std::sync::mpsc::Sender<Event<Payload>>) -> anyhow::Result<Self>
     where
         Self: Sized,
     {
@@ -53,5 +53,5 @@ impl Node<Payload> for UniqueIdsNode {
 }
 
 fn main() -> anyhow::Result<()> {
-    event_loop::<UniqueIdsNode, _>()
+    event_loop::<UniqueIdsNode, _, _>()
 }

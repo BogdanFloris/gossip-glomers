@@ -8,16 +8,16 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Message<Payload> {
-    src: String,
-    dest: String,
+    pub src: String,
+    pub dest: String,
     pub body: Body<Payload>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Body<Payload> {
     #[serde(rename = "msg_id")]
-    id: Option<usize>,
-    in_reply_to: Option<usize>,
+    pub id: Option<usize>,
+    pub in_reply_to: Option<usize>,
     #[serde(flatten)]
     pub payload: Payload,
 }
@@ -63,28 +63,38 @@ pub struct Init {
     pub node_ids: Vec<String>,
 }
 
-pub trait Node<Payload> {
-    fn from_init(init: Init) -> anyhow::Result<Self>
+pub trait Node<Payload, InjectedPayload = ()> {
+    fn from_init(
+        init: Init,
+        tx: std::sync::mpsc::Sender<Event<Payload, InjectedPayload>>,
+    ) -> anyhow::Result<Self>
     where
         Self: Sized;
 
-    fn handle(&mut self, event: Event<Payload>, output: &mut StdoutLock) -> anyhow::Result<()>;
+    fn handle(
+        &mut self,
+        event: Event<Payload, InjectedPayload>,
+        output: &mut StdoutLock,
+    ) -> anyhow::Result<()>;
 }
 
 #[derive(Debug, Clone)]
-pub enum Event<Payload> {
+pub enum Event<Payload, InjectedPayload = ()> {
     Message(Message<Payload>),
+    Injected(InjectedPayload),
     EOF,
 }
 
-pub fn event_loop<N, P>() -> anyhow::Result<()>
+pub fn event_loop<N, P, IP>() -> anyhow::Result<()>
 where
-    N: Node<P>,
+    N: Node<P, IP>,
     P: DeserializeOwned + Send + 'static,
+    IP: Send + 'static,
 {
     let stdin = std::io::stdin().lock();
     let mut stdin = stdin.lines();
     let mut stdout = std::io::stdout().lock();
+    let (tx, rx) = std::sync::mpsc::channel();
 
     let init_msg: Message<InitPayload> = serde_json::from_str(
         &stdin
@@ -97,7 +107,7 @@ where
     let InitPayload::Init(init) = init_msg.body.payload else {
         return Err(anyhow::anyhow!("expected init message"));
     };
-    let mut node: N = N::from_init(init)?;
+    let mut node: N = N::from_init(init, tx.clone())?;
 
     let reply = Message {
         src: init_msg.dest,
@@ -112,8 +122,6 @@ where
     reply.send(&mut stdout).context("send response to init")?;
 
     drop(stdin);
-
-    let (tx, rx) = std::sync::mpsc::channel();
 
     let thread = std::thread::spawn(move || {
         let stdin = std::io::stdin().lock();
