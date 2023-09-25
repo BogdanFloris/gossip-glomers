@@ -1,4 +1,7 @@
-use std::{collections::HashMap, io::StdoutLock};
+use std::{
+    collections::{HashMap, HashSet},
+    io::StdoutLock,
+};
 
 use anyhow::{Context, Ok};
 use gossip_glomers::{event_loop, Init, Node};
@@ -10,13 +13,13 @@ use serde::{Deserialize, Serialize};
 enum Payload {
     Broadcast {
         #[serde(rename = "message")]
-        msg: i32,
+        msg: usize,
     },
     BroadcastOk,
     Read,
     ReadOk {
         #[serde(rename = "messages")]
-        msgs: Vec<i32>,
+        msgs: Vec<usize>,
     },
     Topology {
         #[serde(rename = "topology")]
@@ -28,7 +31,7 @@ enum Payload {
 struct BroadcastNode {
     node: String,
     nodes: Vec<String>,
-    msgs: Vec<i32>,
+    msgs: HashSet<usize>,
     topo: HashMap<String, Vec<String>>,
     id: usize,
 }
@@ -41,7 +44,7 @@ impl Node<Payload> for BroadcastNode {
         Ok(Self {
             node: init.node_id,
             nodes: init.node_ids,
-            msgs: Vec::new(),
+            msgs: HashSet::new(),
             topo: HashMap::new(),
             id: 1,
         })
@@ -58,7 +61,7 @@ impl Node<Payload> for BroadcastNode {
         let mut reply = message.into_reply(Some(&mut self.id));
         match reply.body.payload {
             Payload::Broadcast { msg } => {
-                self.msgs.push(msg);
+                self.msgs.insert(msg);
                 reply.body.payload = Payload::BroadcastOk;
                 reply.send(output).context("send response message")?;
             }
