@@ -56,6 +56,7 @@ impl Node<Payload, InjectedPayload> for BroadcastNode {
         Self: Sized,
     {
         // Generate a Gossip injection event every 500ms
+        // TODO: handle EOF (AtomicBool?)
         std::thread::spawn(move || loop {
             std::thread::sleep(Duration::from_millis(500));
             if let Err(_) = tx.send(gossip_glomers::Event::Injected(InjectedPayload::Gossip)) {
