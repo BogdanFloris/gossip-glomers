@@ -118,7 +118,7 @@ impl Node<Payload, InjectedPayload> for BroadcastNode {
             gossip_glomers::Event::Injected(_) => {
                 for neighbor in &self.neighbors {
                     let known_to_n = &self.known[neighbor];
-                    let seen = self.msgs.difference(&known_to_n).cloned().collect();
+                    let seen = self.msgs.difference(&known_to_n).copied().collect();
                     let to_send = gossip_glomers::Message {
                         src: self.node.clone(),
                         dest: neighbor.clone(),
