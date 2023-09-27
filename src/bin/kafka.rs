@@ -42,8 +42,12 @@ enum InjectedPayload {}
 
 struct KafkaNode {
     id: usize,
-    logs: HashMap<String, Vec<u64>>,
-    commit_offsets: HashMap<String, usize>,
+    /// Map of key to map of offset to message
+    logs: HashMap<String, HashMap<usize, u64>>,
+    /// Map of key to latest offset
+    latest_offsets: HashMap<String, usize>,
+    /// Map of key to committed offset
+    committed_offsets: HashMap<String, usize>,
 }
 
 impl Node<Payload, InjectedPayload> for KafkaNode {
@@ -57,7 +61,8 @@ impl Node<Payload, InjectedPayload> for KafkaNode {
         Ok(Self {
             id: 1,
             logs: HashMap::new(),
-            commit_offsets: HashMap::new(),
+            latest_offsets: HashMap::new(),
+            committed_offsets: HashMap::new(),
         })
     }
 
@@ -72,34 +77,33 @@ impl Node<Payload, InjectedPayload> for KafkaNode {
                 let mut reply = message.into_reply(Some(&mut self.id));
                 match reply.body.payload {
                     Payload::Send { key, msg } => {
-                        let logs_for_key = self.logs.entry(key).or_default();
-                        logs_for_key.push(msg);
+                        let offset_to_msg_map = self.logs.entry(key.clone()).or_default();
+                        let latest_offset = self.latest_offsets.entry(key).or_insert_with(|| 0);
+                        offset_to_msg_map.insert(*latest_offset, msg);
                         reply.body.payload = Payload::SendOk {
-                            offset: logs_for_key.len() - 1,
+                            offset: *latest_offset,
                         };
+                        *latest_offset += 1;
                         reply.send(output).context("send send ok response")?;
                     }
                     Payload::Poll { offsets } => {
-                        let mut msgs = HashMap::new();
+                        let mut msgs: HashMap<String, Vec<Vec<u64>>> = HashMap::new();
                         for (key, offset) in offsets {
-                            let logs_for_key = self.logs.entry(key.clone()).or_default();
-                            let msgs_for_key = logs_for_key
-                                .iter()
-                                .skip(offset)
-                                .take(MSGS_TO_POLL)
-                                .enumerate()
-                                .map(|(i, msg)| {
-                                    vec![(offset + i) as u64, (*msg).try_into().unwrap()]
-                                })
-                                .collect::<Vec<Vec<u64>>>();
-                            msgs.insert(key, msgs_for_key);
+                            let offset_to_msg_map = self.logs.entry(key.clone()).or_default();
+                            for i in offset..(offset + MSGS_TO_POLL) {
+                                if let Some(msg) = offset_to_msg_map.get(&i) {
+                                    msgs.entry(key.clone())
+                                        .or_default()
+                                        .push(vec![i as u64, *msg]);
+                                }
+                            }
                         }
                         reply.body.payload = Payload::PollOk { msgs };
                         reply.send(output).context("send poll ok response")?;
                     }
                     Payload::CommitOffsets { offsets } => {
                         offsets.into_iter().for_each(|(key, offset)| {
-                            self.commit_offsets
+                            self.committed_offsets
                                 .entry(key)
                                 .and_modify(|o| *o = offset)
                                 .or_insert(offset);
@@ -112,7 +116,7 @@ impl Node<Payload, InjectedPayload> for KafkaNode {
                     Payload::ListCommittedOffsets { keys } => {
                         let mut offsets = HashMap::new();
                         keys.into_iter().for_each(|key| {
-                            if let Some(offset) = self.commit_offsets.get(&key) {
+                            if let Some(offset) = self.committed_offsets.get(&key) {
                                 offsets.insert(key, *offset);
                             }
                         });
