@@ -50,17 +50,22 @@ struct BroadcastNode {
 impl Node<Payload, InjectedPayload> for BroadcastNode {
     fn from_init(
         init: Init,
-        tx: std::sync::mpsc::Sender<Event<Payload, InjectedPayload>>,
+        tx: tokio::sync::mpsc::Sender<Event<Payload, InjectedPayload>>,
     ) -> anyhow::Result<Self>
     where
         Self: Sized,
     {
         // Generate a Gossip injection event every 500ms
         // TODO: handle EOF (AtomicBool?)
-        std::thread::spawn(move || loop {
-            std::thread::sleep(Duration::from_millis(500));
-            if let Err(_) = tx.send(gossip_glomers::Event::Injected(InjectedPayload::Gossip)) {
-                break;
+        tokio::spawn(async move {
+            loop {
+                std::thread::sleep(Duration::from_millis(500));
+                if let Err(_) = tx
+                    .send(gossip_glomers::Event::Injected(InjectedPayload::Gossip))
+                    .await
+                {
+                    break;
+                }
             }
         });
         Ok(Self {
@@ -137,6 +142,7 @@ impl Node<Payload, InjectedPayload> for BroadcastNode {
     }
 }
 
-fn main() -> anyhow::Result<()> {
-    event_loop::<BroadcastNode, _, _>()
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    event_loop::<BroadcastNode, _, _>().await
 }

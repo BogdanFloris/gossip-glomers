@@ -53,7 +53,7 @@ struct KafkaNode {
 impl Node<Payload, InjectedPayload> for KafkaNode {
     fn from_init(
         _init: Init,
-        _tx: std::sync::mpsc::Sender<Event<Payload, InjectedPayload>>,
+        _tx: tokio::sync::mpsc::Sender<Event<Payload, InjectedPayload>>,
     ) -> anyhow::Result<Self>
     where
         Self: Sized,
@@ -137,6 +137,7 @@ impl Node<Payload, InjectedPayload> for KafkaNode {
     }
 }
 
-fn main() -> anyhow::Result<()> {
-    event_loop::<KafkaNode, _, _>()
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    event_loop::<KafkaNode, _, _>().await
 }

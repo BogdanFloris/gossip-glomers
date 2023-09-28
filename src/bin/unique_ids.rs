@@ -21,7 +21,7 @@ struct UniqueIdsNode {
 }
 
 impl Node<Payload> for UniqueIdsNode {
-    fn from_init(init: Init, _tx: std::sync::mpsc::Sender<Event<Payload>>) -> anyhow::Result<Self>
+    fn from_init(init: Init, _tx: tokio::sync::mpsc::Sender<Event<Payload>>) -> anyhow::Result<Self>
     where
         Self: Sized,
     {
@@ -52,6 +52,7 @@ impl Node<Payload> for UniqueIdsNode {
     }
 }
 
-fn main() -> anyhow::Result<()> {
-    event_loop::<UniqueIdsNode, _, _>()
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    event_loop::<UniqueIdsNode, _, _>().await
 }

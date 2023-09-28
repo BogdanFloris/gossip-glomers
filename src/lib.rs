@@ -1,10 +1,10 @@
-use std::io::BufRead;
 use std::io::StdoutLock;
 use std::io::Write;
 
 use anyhow::{Context, Ok};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use tokio::io::AsyncBufReadExt;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Message<Payload> {
@@ -66,7 +66,7 @@ pub struct Init {
 pub trait Node<Payload, InjectedPayload = ()> {
     fn from_init(
         init: Init,
-        tx: std::sync::mpsc::Sender<Event<Payload, InjectedPayload>>,
+        tx: tokio::sync::mpsc::Sender<Event<Payload, InjectedPayload>>,
     ) -> anyhow::Result<Self>
     where
         Self: Sized;
@@ -85,20 +85,22 @@ pub enum Event<Payload, InjectedPayload = ()> {
     EOF,
 }
 
-pub fn event_loop<N, P, IP>() -> anyhow::Result<()>
+pub async fn event_loop<N, P, IP>() -> anyhow::Result<()>
 where
     N: Node<P, IP>,
     P: DeserializeOwned + Send + 'static,
     IP: Send + 'static,
 {
-    let stdin = std::io::stdin().lock();
-    let mut stdin = stdin.lines();
+    let stdin = tokio::io::stdin();
+    let stdin = tokio::io::BufReader::new(stdin);
     let mut stdout = std::io::stdout().lock();
-    let (tx, rx) = std::sync::mpsc::channel();
+    let (tx, mut rx) = tokio::sync::mpsc::channel(1);
 
     let init_msg: Message<InitPayload> = serde_json::from_str(
         &stdin
-            .next()
+            .lines()
+            .next_line()
+            .await
             .expect("read init")
             .context("failed to read init message from stdin")?,
     )
@@ -121,15 +123,13 @@ where
 
     reply.send(&mut stdout).context("send response to init")?;
 
-    drop(stdin);
-
-    let thread = std::thread::spawn(move || {
-        let stdin = std::io::stdin().lock();
-        for line in stdin.lines() {
-            let line = line.context("input from Maelstrom on stdin could not be read")?;
+    let thread = tokio::spawn(async move {
+        let stdin = tokio::io::stdin();
+        let mut stdin = tokio::io::BufReader::new(stdin).lines();
+        while let Some(line) = stdin.next_line().await.expect("read line") {
             let input: Message<P> = serde_json::from_str(&line)
                 .context("input from Maelstrom on stdin could not be deserialized")?;
-            if let Err(_) = tx.send(Event::Message(input)) {
+            if let Err(_) = tx.send(Event::Message(input)).await {
                 return Ok(());
             }
         }
@@ -137,13 +137,13 @@ where
         Ok(())
     });
 
-    for event in rx {
+    while let Some(event) = rx.recv().await {
         node.handle(event, &mut stdout)
             .context("failed to handle event")?;
     }
 
     thread
-        .join()
+        .await
         .expect("stdin thread panicked")
         .context("stdin thread errored")?;
 
