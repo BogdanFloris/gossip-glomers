@@ -1,6 +1,7 @@
-use std::{cmp, collections::HashMap, io::StdoutLock, time::Duration};
+use std::{cmp, collections::HashMap, time::Duration};
 
 use anyhow::{Context, Ok};
+use async_trait::async_trait;
 use gossip_glomers::{event_loop, Event, Init, Node};
 use serde::{Deserialize, Serialize};
 
@@ -29,10 +30,14 @@ struct CounterNode {
     counter: HashMap<String, u64>,
 }
 
+#[async_trait]
 impl Node<Payload, InjectedPayload> for CounterNode {
     fn from_init(
         init: Init,
         tx: tokio::sync::mpsc::Sender<Event<Payload, InjectedPayload>>,
+        _rpc_senders: tokio::sync::Mutex<
+            HashMap<usize, tokio::sync::oneshot::Sender<Event<Payload, InjectedPayload>>>,
+        >,
     ) -> anyhow::Result<Self>
     where
         Self: Sized,
@@ -59,10 +64,10 @@ impl Node<Payload, InjectedPayload> for CounterNode {
         })
     }
 
-    fn handle(
+    async fn handle(
         &mut self,
         event: gossip_glomers::Event<Payload, InjectedPayload>,
-        output: &mut StdoutLock,
+        output: &mut tokio::io::Stdout,
     ) -> anyhow::Result<()> {
         match event {
             gossip_glomers::Event::EOF => {}
@@ -74,13 +79,13 @@ impl Node<Payload, InjectedPayload> for CounterNode {
                             *current += delta;
                         }
                         reply.body.payload = Payload::AddOk;
-                        reply.send(output).context("send add response")?;
+                        reply.send(output).await.context("send add response")?;
                     }
                     Payload::AddOk => {}
                     Payload::Read => {
                         let value = self.counter.iter().map(|(_, v)| v).sum();
                         reply.body.payload = Payload::ReadOk { value };
-                        reply.send(output).context("send read response")?;
+                        reply.send(output).await.context("send read response")?;
                     }
                     Payload::ReadOk { .. } => {}
                     Payload::Sync { value } => {
@@ -104,7 +109,7 @@ impl Node<Payload, InjectedPayload> for CounterNode {
                                 },
                             },
                         };
-                        sync_msg.send(output).context("send sync message")?;
+                        sync_msg.send(output).await.context("send sync message")?;
                     }
                 }
             }

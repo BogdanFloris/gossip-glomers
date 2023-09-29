@@ -1,6 +1,8 @@
 use std::{collections::HashMap, io::StdoutLock};
+use std::collections::HashMap;
 
 use anyhow::{Context, Ok};
+use async_trait::async_trait;
 use gossip_glomers::{event_loop, Event, Init, Node};
 use serde::{Deserialize, Serialize};
 
@@ -48,12 +50,20 @@ struct KafkaNode {
     latest_offsets: HashMap<String, usize>,
     /// Map of key to committed offset
     committed_offsets: HashMap<String, usize>,
+    /// Map of message id to the one shot senders. This is used to send sync replies to RPCs
+    rpc_senders: tokio::sync::Mutex<
+        HashMap<usize, tokio::sync::oneshot::Sender<Event<Payload, InjectedPayload>>>,
+    >,
 }
 
+#[async_trait]
 impl Node<Payload, InjectedPayload> for KafkaNode {
     fn from_init(
         _init: Init,
         _tx: tokio::sync::mpsc::Sender<Event<Payload, InjectedPayload>>,
+        rpc_senders: tokio::sync::Mutex<
+            HashMap<usize, tokio::sync::oneshot::Sender<Event<Payload, InjectedPayload>>>,
+        >,
     ) -> anyhow::Result<Self>
     where
         Self: Sized,
@@ -63,13 +73,14 @@ impl Node<Payload, InjectedPayload> for KafkaNode {
             logs: HashMap::new(),
             latest_offsets: HashMap::new(),
             committed_offsets: HashMap::new(),
+            rpc_senders,
         })
     }
 
-    fn handle(
+    async fn handle(
         &mut self,
         event: gossip_glomers::Event<Payload, InjectedPayload>,
-        output: &mut StdoutLock,
+        output: &mut tokio::io::Stdout,
     ) -> anyhow::Result<()> {
         match event {
             gossip_glomers::Event::EOF => {}
@@ -84,7 +95,7 @@ impl Node<Payload, InjectedPayload> for KafkaNode {
                             offset: *latest_offset,
                         };
                         *latest_offset += 1;
-                        reply.send(output).context("send send ok response")?;
+                        reply.send(output).await.context("send send ok response")?;
                     }
                     Payload::Poll { offsets } => {
                         let mut msgs: HashMap<String, Vec<Vec<u64>>> = HashMap::new();
@@ -99,7 +110,7 @@ impl Node<Payload, InjectedPayload> for KafkaNode {
                             }
                         }
                         reply.body.payload = Payload::PollOk { msgs };
-                        reply.send(output).context("send poll ok response")?;
+                        reply.send(output).await.context("send poll ok response")?;
                     }
                     Payload::CommitOffsets { offsets } => {
                         offsets.into_iter().for_each(|(key, offset)| {
@@ -111,6 +122,7 @@ impl Node<Payload, InjectedPayload> for KafkaNode {
                         reply.body.payload = Payload::CommitOffsetsOk;
                         reply
                             .send(output)
+                            .await
                             .context("send commit offsets ok response")?;
                     }
                     Payload::ListCommittedOffsets { keys } => {
@@ -123,6 +135,7 @@ impl Node<Payload, InjectedPayload> for KafkaNode {
                         reply.body.payload = Payload::ListCommittedOffsetsOk { offsets };
                         reply
                             .send(output)
+                            .await
                             .context("send list commit offsets ok response")?;
                     }
                     Payload::ListCommittedOffsetsOk { .. }

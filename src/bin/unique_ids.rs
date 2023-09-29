@@ -1,6 +1,7 @@
-use std::io::StdoutLock;
+use std::collections::HashMap;
 
 use anyhow::{Context, Ok};
+use async_trait::async_trait;
 use gossip_glomers::{event_loop, Event, Init, Node};
 use serde::{Deserialize, Serialize};
 
@@ -20,8 +21,16 @@ struct UniqueIdsNode {
     id: usize,
 }
 
+#[async_trait]
 impl Node<Payload> for UniqueIdsNode {
-    fn from_init(init: Init, _tx: tokio::sync::mpsc::Sender<Event<Payload>>) -> anyhow::Result<Self>
+    fn from_init(
+        init: Init,
+        _tx: tokio::sync::mpsc::Sender<Event<Payload>>,
+
+        _rpc_senders: tokio::sync::Mutex<
+            HashMap<usize, tokio::sync::oneshot::Sender<Event<Payload>>>,
+        >,
+    ) -> anyhow::Result<Self>
     where
         Self: Sized,
     {
@@ -31,10 +40,10 @@ impl Node<Payload> for UniqueIdsNode {
         })
     }
 
-    fn handle(
+    async fn handle(
         &mut self,
         event: gossip_glomers::Event<Payload>,
-        output: &mut StdoutLock,
+        output: &mut tokio::io::Stdout,
     ) -> anyhow::Result<()> {
         let gossip_glomers::Event::Message(message) = event else {
             panic!("unexpected event: {:?}", event);
@@ -44,7 +53,7 @@ impl Node<Payload> for UniqueIdsNode {
             Payload::Generate => {
                 let guid = format!("{}-{}", self.node, self.id);
                 reply.body.payload = Payload::GenerateOk { guid };
-                reply.send(output).context("send response message")?;
+                reply.send(output).await.context("send response message")?;
             }
             Payload::GenerateOk { .. } => {}
         }

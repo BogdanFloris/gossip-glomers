@@ -1,7 +1,8 @@
-use std::io::StdoutLock;
-use std::io::Write;
+use std::collections::HashMap;
+use tokio::io::AsyncWriteExt;
 
 use anyhow::{Context, Ok};
+use async_trait::async_trait;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncBufReadExt;
@@ -39,12 +40,17 @@ impl<Payload> Message<Payload> {
         }
     }
 
-    pub fn send(&self, output: &mut impl Write) -> anyhow::Result<()>
+    pub async fn send(&self, out: &mut tokio::io::Stdout) -> anyhow::Result<()>
     where
         Payload: Serialize,
     {
-        serde_json::to_writer(&mut *output, self).context("serialize response message")?;
-        output.write_all(b"\n").context("write trailing newline")?;
+        let raw_msg = serde_json::to_string(self).context("deserialize message")?;
+        out.write_all(raw_msg.as_bytes())
+            .await
+            .context("serialize response message")?;
+        out.write_all(b"\n")
+            .await
+            .context("write trailing newline")?;
         Ok(())
     }
 }
@@ -63,18 +69,22 @@ pub struct Init {
     pub node_ids: Vec<String>,
 }
 
+#[async_trait]
 pub trait Node<Payload, InjectedPayload = ()> {
     fn from_init(
         init: Init,
         tx: tokio::sync::mpsc::Sender<Event<Payload, InjectedPayload>>,
+        rpc_senders: tokio::sync::Mutex<
+            HashMap<usize, tokio::sync::oneshot::Sender<Event<Payload, InjectedPayload>>>,
+        >,
     ) -> anyhow::Result<Self>
     where
         Self: Sized;
 
-    fn handle(
+    async fn handle(
         &mut self,
         event: Event<Payload, InjectedPayload>,
-        output: &mut StdoutLock,
+        output: &mut tokio::io::Stdout,
     ) -> anyhow::Result<()>;
 }
 
@@ -93,7 +103,7 @@ where
 {
     let stdin = tokio::io::stdin();
     let stdin = tokio::io::BufReader::new(stdin);
-    let mut stdout = std::io::stdout().lock();
+    let mut stdout = tokio::io::stdout();
     let (tx, mut rx) = tokio::sync::mpsc::channel(1);
 
     let init_msg: Message<InitPayload> = serde_json::from_str(
@@ -109,7 +119,8 @@ where
     let InitPayload::Init(init) = init_msg.body.payload else {
         return Err(anyhow::anyhow!("expected init message"));
     };
-    let mut node: N = N::from_init(init, tx.clone())?;
+    let rpc_senders = tokio::sync::Mutex::new(HashMap::new());
+    let mut node: N = N::from_init(init, tx.clone(), rpc_senders)?;
 
     let reply = Message {
         src: init_msg.dest,
@@ -121,7 +132,10 @@ where
         },
     };
 
-    reply.send(&mut stdout).context("send response to init")?;
+    reply
+        .send(&mut stdout)
+        .await
+        .context("send response to init")?;
 
     let thread = tokio::spawn(async move {
         let stdin = tokio::io::stdin();
@@ -139,6 +153,7 @@ where
 
     while let Some(event) = rx.recv().await {
         node.handle(event, &mut stdout)
+            .await
             .context("failed to handle event")?;
     }
 
