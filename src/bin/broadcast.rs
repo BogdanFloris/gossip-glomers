@@ -52,9 +52,6 @@ impl Node<Payload, InjectedPayload> for BroadcastNode {
     fn from_init(
         init: Init,
         tx: tokio::sync::mpsc::Sender<Event<Payload, InjectedPayload>>,
-        _rpc_senders: tokio::sync::Mutex<
-            HashMap<usize, tokio::sync::oneshot::Sender<Event<Payload, InjectedPayload>>>,
-        >,
     ) -> anyhow::Result<Self>
     where
         Self: Sized,

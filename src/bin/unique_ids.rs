@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use anyhow::{Context, Ok};
 use async_trait::async_trait;
 use gossip_glomers::{event_loop, Event, Init, Node};
@@ -23,14 +21,7 @@ struct UniqueIdsNode {
 
 #[async_trait]
 impl Node<Payload> for UniqueIdsNode {
-    fn from_init(
-        init: Init,
-        _tx: tokio::sync::mpsc::Sender<Event<Payload>>,
-
-        _rpc_senders: tokio::sync::Mutex<
-            HashMap<usize, tokio::sync::oneshot::Sender<Event<Payload>>>,
-        >,
-    ) -> anyhow::Result<Self>
+    fn from_init(init: Init, _tx: tokio::sync::mpsc::Sender<Event<Payload>>) -> anyhow::Result<Self>
     where
         Self: Sized,
     {

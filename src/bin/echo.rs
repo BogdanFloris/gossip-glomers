@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use anyhow::{Context, Ok};
 use async_trait::async_trait;
 use gossip_glomers::{event_loop, Event, Init, Node};
@@ -22,9 +20,6 @@ impl Node<Payload> for EchoNode {
     fn from_init(
         _init: Init,
         _tx: tokio::sync::mpsc::Sender<Event<Payload>>,
-        _rpc_senders: tokio::sync::Mutex<
-            HashMap<usize, tokio::sync::oneshot::Sender<Event<Payload>>>,
-        >,
     ) -> anyhow::Result<Self>
     where
         Self: Sized,

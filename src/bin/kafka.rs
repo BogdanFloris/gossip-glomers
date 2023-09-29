@@ -1,4 +1,3 @@
-use std::{collections::HashMap, io::StdoutLock};
 use std::collections::HashMap;
 
 use anyhow::{Context, Ok};
@@ -50,10 +49,6 @@ struct KafkaNode {
     latest_offsets: HashMap<String, usize>,
     /// Map of key to committed offset
     committed_offsets: HashMap<String, usize>,
-    /// Map of message id to the one shot senders. This is used to send sync replies to RPCs
-    rpc_senders: tokio::sync::Mutex<
-        HashMap<usize, tokio::sync::oneshot::Sender<Event<Payload, InjectedPayload>>>,
-    >,
 }
 
 #[async_trait]
@@ -61,9 +56,6 @@ impl Node<Payload, InjectedPayload> for KafkaNode {
     fn from_init(
         _init: Init,
         _tx: tokio::sync::mpsc::Sender<Event<Payload, InjectedPayload>>,
-        rpc_senders: tokio::sync::Mutex<
-            HashMap<usize, tokio::sync::oneshot::Sender<Event<Payload, InjectedPayload>>>,
-        >,
     ) -> anyhow::Result<Self>
     where
         Self: Sized,
@@ -73,7 +65,6 @@ impl Node<Payload, InjectedPayload> for KafkaNode {
             logs: HashMap::new(),
             latest_offsets: HashMap::new(),
             committed_offsets: HashMap::new(),
-            rpc_senders,
         })
     }
 

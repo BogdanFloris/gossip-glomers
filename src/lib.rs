@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use tokio::io::AsyncWriteExt;
 
 use anyhow::{Context, Ok};
@@ -74,9 +73,6 @@ pub trait Node<Payload, InjectedPayload = ()> {
     fn from_init(
         init: Init,
         tx: tokio::sync::mpsc::Sender<Event<Payload, InjectedPayload>>,
-        rpc_senders: tokio::sync::Mutex<
-            HashMap<usize, tokio::sync::oneshot::Sender<Event<Payload, InjectedPayload>>>,
-        >,
     ) -> anyhow::Result<Self>
     where
         Self: Sized;
@@ -119,8 +115,7 @@ where
     let InitPayload::Init(init) = init_msg.body.payload else {
         return Err(anyhow::anyhow!("expected init message"));
     };
-    let rpc_senders = tokio::sync::Mutex::new(HashMap::new());
-    let mut node: N = N::from_init(init, tx.clone(), rpc_senders)?;
+    let mut node: N = N::from_init(init, tx.clone())?;
 
     let reply = Message {
         src: init_msg.dest,

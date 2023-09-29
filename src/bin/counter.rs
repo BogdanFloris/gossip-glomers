@@ -35,9 +35,6 @@ impl Node<Payload, InjectedPayload> for CounterNode {
     fn from_init(
         init: Init,
         tx: tokio::sync::mpsc::Sender<Event<Payload, InjectedPayload>>,
-        _rpc_senders: tokio::sync::Mutex<
-            HashMap<usize, tokio::sync::oneshot::Sender<Event<Payload, InjectedPayload>>>,
-        >,
     ) -> anyhow::Result<Self>
     where
         Self: Sized,
