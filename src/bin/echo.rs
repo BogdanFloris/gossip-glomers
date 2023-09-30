@@ -1,3 +1,5 @@
+use std::sync::atomic::AtomicUsize;
+
 use anyhow::{Context, Ok};
 use async_trait::async_trait;
 use gossip_glomers::{event_loop, Event, Init, Node};
@@ -12,7 +14,7 @@ enum Payload {
 }
 
 struct EchoNode {
-    id: usize,
+    id: AtomicUsize,
 }
 
 #[async_trait]
@@ -24,18 +26,18 @@ impl Node<Payload> for EchoNode {
     where
         Self: Sized,
     {
-        Ok(Self { id: 1 })
+        Ok(Self { id: 1.into() })
     }
 
     async fn handle(
-        &mut self,
+        &self,
         event: gossip_glomers::Event<Payload>,
         output: &mut tokio::io::Stdout,
     ) -> anyhow::Result<()> {
         let gossip_glomers::Event::Message(message) = event else {
             panic!("unexpected event: {:?}", event);
         };
-        let mut reply = message.into_reply(Some(&mut self.id));
+        let mut reply = message.into_reply(Some(&self.id));
         match reply.body.payload {
             Payload::Echo { echo } => {
                 reply.body.payload = Payload::EchoOk { echo };

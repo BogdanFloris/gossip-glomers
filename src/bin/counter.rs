@@ -1,9 +1,10 @@
-use std::{cmp, collections::HashMap, time::Duration};
+use std::{cmp, collections::HashMap, sync::atomic::AtomicUsize, time::Duration};
 
 use anyhow::{Context, Ok};
 use async_trait::async_trait;
 use gossip_glomers::{event_loop, Event, Init, Node};
 use serde::{Deserialize, Serialize};
+use tokio::sync::Mutex;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "type")]
@@ -24,10 +25,10 @@ enum InjectedPayload {
 }
 
 struct CounterNode {
-    id: usize,
+    id: AtomicUsize,
     node: String,
     nodes: Vec<String>,
-    counter: HashMap<String, u64>,
+    counter: Mutex<HashMap<String, u64>>,
 }
 
 #[async_trait]
@@ -54,25 +55,25 @@ impl Node<Payload, InjectedPayload> for CounterNode {
         });
 
         Ok(Self {
-            id: 1,
+            id: 1.into(),
             node: init.node_id,
             nodes: init.node_ids.clone(),
-            counter: init.node_ids.into_iter().map(|id| (id, 0)).collect(),
+            counter: Mutex::new(init.node_ids.into_iter().map(|id| (id, 0)).collect()),
         })
     }
 
     async fn handle(
-        &mut self,
+        &self,
         event: gossip_glomers::Event<Payload, InjectedPayload>,
         output: &mut tokio::io::Stdout,
     ) -> anyhow::Result<()> {
         match event {
             gossip_glomers::Event::EOF => {}
             gossip_glomers::Event::Message(message) => {
-                let mut reply = message.into_reply(Some(&mut self.id));
+                let mut reply = message.into_reply(Some(&self.id));
                 match reply.body.payload {
                     Payload::Add { delta } => {
-                        if let Some(current) = self.counter.get_mut(&reply.src) {
+                        if let Some(current) = self.counter.lock().await.get_mut(&reply.src) {
                             *current += delta;
                         }
                         reply.body.payload = Payload::AddOk;
@@ -80,13 +81,13 @@ impl Node<Payload, InjectedPayload> for CounterNode {
                     }
                     Payload::AddOk => {}
                     Payload::Read => {
-                        let value = self.counter.iter().map(|(_, v)| v).sum();
+                        let value = self.counter.lock().await.iter().map(|(_, v)| v).sum();
                         reply.body.payload = Payload::ReadOk { value };
                         reply.send(output).await.context("send read response")?;
                     }
                     Payload::ReadOk { .. } => {}
                     Payload::Sync { value } => {
-                        if let Some(current) = self.counter.get_mut(&reply.dest) {
+                        if let Some(current) = self.counter.lock().await.get_mut(&reply.dest) {
                             *current = cmp::max(*current, value);
                         }
                     }
@@ -102,7 +103,7 @@ impl Node<Payload, InjectedPayload> for CounterNode {
                                 id: None,
                                 in_reply_to: None,
                                 payload: Payload::Sync {
-                                    value: self.counter[&self.node],
+                                    value: self.counter.lock().await[&self.node],
                                 },
                             },
                         };

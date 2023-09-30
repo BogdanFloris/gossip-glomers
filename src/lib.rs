@@ -1,3 +1,6 @@
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+
 use tokio::io::AsyncWriteExt;
 
 use anyhow::{Context, Ok};
@@ -23,16 +26,12 @@ pub struct Body<Payload> {
 }
 
 impl<Payload> Message<Payload> {
-    pub fn into_reply(self, id: Option<&mut usize>) -> Self {
+    pub fn into_reply(self, id: Option<&AtomicUsize>) -> Self {
         Self {
             src: self.dest,
             dest: self.src,
             body: Body {
-                id: id.map(|id| {
-                    let temp = *id;
-                    *id += 1;
-                    temp
-                }),
+                id: id.map(|id| id.fetch_add(1, Ordering::SeqCst)),
                 in_reply_to: self.body.id,
                 payload: self.body.payload,
             },
@@ -69,7 +68,7 @@ pub struct Init {
 }
 
 #[async_trait]
-pub trait Node<Payload, InjectedPayload = ()> {
+pub trait Node<Payload, InjectedPayload = ()>: Sync + Send {
     fn from_init(
         init: Init,
         tx: tokio::sync::mpsc::Sender<Event<Payload, InjectedPayload>>,
@@ -78,7 +77,7 @@ pub trait Node<Payload, InjectedPayload = ()> {
         Self: Sized;
 
     async fn handle(
-        &mut self,
+        &self,
         event: Event<Payload, InjectedPayload>,
         output: &mut tokio::io::Stdout,
     ) -> anyhow::Result<()>;
@@ -93,7 +92,7 @@ pub enum Event<Payload, InjectedPayload = ()> {
 
 pub async fn event_loop<N, P, IP>() -> anyhow::Result<()>
 where
-    N: Node<P, IP>,
+    N: Node<P, IP> + 'static,
     P: DeserializeOwned + Send + 'static,
     IP: Send + 'static,
 {
@@ -115,7 +114,7 @@ where
     let InitPayload::Init(init) = init_msg.body.payload else {
         return Err(anyhow::anyhow!("expected init message"));
     };
-    let mut node: N = N::from_init(init, tx.clone())?;
+    let node = Arc::new(N::from_init(init, tx.clone())?);
 
     let reply = Message {
         src: init_msg.dest,
@@ -147,9 +146,15 @@ where
     });
 
     while let Some(event) = rx.recv().await {
-        node.handle(event, &mut stdout)
-            .await
-            .context("failed to handle event")?;
+        let node_clone = node.clone();
+        tokio::spawn(async move {
+            let mut stdout = tokio::io::stdout();
+            node_clone
+                .handle(event, &mut stdout)
+                .await
+                .context("failed to handle event")?;
+            Ok(())
+        });
     }
 
     thread

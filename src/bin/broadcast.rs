@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
+    sync::atomic::AtomicUsize,
     time::Duration,
 };
 
@@ -7,6 +8,7 @@ use anyhow::{Context, Ok};
 use async_trait::async_trait;
 use gossip_glomers::{event_loop, Event, Init, Node};
 use serde::{Deserialize, Serialize};
+use tokio::sync::Mutex;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "type")]
@@ -41,10 +43,10 @@ enum InjectedPayload {
 
 struct BroadcastNode {
     node: String,
-    msgs: HashSet<usize>,
-    neighbors: Vec<String>,
-    known: HashMap<String, HashSet<usize>>,
-    id: usize,
+    msgs: Mutex<HashSet<usize>>,
+    neighbors: Mutex<Vec<String>>,
+    known: Mutex<HashMap<String, HashSet<usize>>>,
+    id: AtomicUsize,
 }
 
 #[async_trait]
@@ -71,49 +73,52 @@ impl Node<Payload, InjectedPayload> for BroadcastNode {
         });
         Ok(Self {
             node: init.node_id,
-            msgs: HashSet::new(),
-            neighbors: Vec::new(),
-            known: init
-                .node_ids
-                .into_iter()
-                .map(|id| (id, HashSet::new()))
-                .collect(),
-            id: 1,
+            msgs: Mutex::new(HashSet::new()),
+            neighbors: Mutex::new(Vec::new()),
+            known: Mutex::new(
+                init.node_ids
+                    .into_iter()
+                    .map(|id| (id, HashSet::new()))
+                    .collect(),
+            ),
+            id: 1.into(),
         })
     }
 
     async fn handle(
-        &mut self,
+        &self,
         event: gossip_glomers::Event<Payload, InjectedPayload>,
         output: &mut tokio::io::Stdout,
     ) -> anyhow::Result<()> {
         match event {
             gossip_glomers::Event::EOF => {}
             gossip_glomers::Event::Message(message) => {
-                let mut reply = message.into_reply(Some(&mut self.id));
+                let mut reply = message.into_reply(Some(&self.id));
                 match reply.body.payload {
                     Payload::Gossip { seen } => {
                         self.known
+                            .lock()
+                            .await
                             .get_mut(&reply.dest)
                             .expect("got gossip from unknown node")
                             .extend(seen.iter().copied());
-                        self.msgs.extend(seen);
+                        self.msgs.lock().await.extend(seen);
                     }
                     Payload::Broadcast { msg } => {
-                        self.msgs.insert(msg);
+                        self.msgs.lock().await.insert(msg);
                         reply.body.payload = Payload::BroadcastOk;
                         reply.send(output).await.context("send response message")?;
                     }
                     Payload::BroadcastOk => {}
                     Payload::Read => {
                         reply.body.payload = Payload::ReadOk {
-                            msgs: self.msgs.clone(),
+                            msgs: self.msgs.lock().await.clone(),
                         };
                         reply.send(output).await.context("send response message")?;
                     }
                     Payload::ReadOk { .. } => {}
                     Payload::Topology { mut topo } => {
-                        self.neighbors = topo
+                        *self.neighbors.lock().await = topo
                             .remove(&self.node)
                             .unwrap_or_else(|| panic!("node {} not found in topology", self.node));
                         reply.body.payload = Payload::TopologyOk;
@@ -123,9 +128,15 @@ impl Node<Payload, InjectedPayload> for BroadcastNode {
                 }
             }
             gossip_glomers::Event::Injected(_) => {
-                for neighbor in &self.neighbors {
-                    let known_to_n = &self.known[neighbor];
-                    let seen = self.msgs.difference(&known_to_n).copied().collect();
+                for neighbor in self.neighbors.lock().await.iter() {
+                    let known_to_n = &self.known.lock().await[neighbor];
+                    let seen = self
+                        .msgs
+                        .lock()
+                        .await
+                        .difference(&known_to_n)
+                        .copied()
+                        .collect();
                     let to_send = gossip_glomers::Message {
                         src: self.node.clone(),
                         dest: neighbor.clone(),
