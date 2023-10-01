@@ -46,6 +46,7 @@ struct BroadcastNode {
     msgs: Mutex<HashSet<usize>>,
     neighbors: Mutex<Vec<String>>,
     known: Mutex<HashMap<String, HashSet<usize>>>,
+    stdout: Mutex<tokio::io::Stdout>,
     id: AtomicUsize,
 }
 
@@ -54,6 +55,7 @@ impl Node<Payload, InjectedPayload> for BroadcastNode {
     fn from_init(
         init: Init,
         tx: tokio::sync::mpsc::Sender<Event<Payload, InjectedPayload>>,
+        stdout: Mutex<tokio::io::Stdout>,
     ) -> anyhow::Result<Self>
     where
         Self: Sized,
@@ -82,13 +84,13 @@ impl Node<Payload, InjectedPayload> for BroadcastNode {
                     .collect(),
             ),
             id: 1.into(),
+            stdout,
         })
     }
 
     async fn handle(
         &self,
         event: gossip_glomers::Event<Payload, InjectedPayload>,
-        output: &mut tokio::io::Stdout,
     ) -> anyhow::Result<()> {
         match event {
             gossip_glomers::Event::EOF => {}
@@ -107,14 +109,20 @@ impl Node<Payload, InjectedPayload> for BroadcastNode {
                     Payload::Broadcast { msg } => {
                         self.msgs.lock().await.insert(msg);
                         reply.body.payload = Payload::BroadcastOk;
-                        reply.send(output).await.context("send response message")?;
+                        reply
+                            .send(&self.stdout)
+                            .await
+                            .context("send response message")?;
                     }
                     Payload::BroadcastOk => {}
                     Payload::Read => {
                         reply.body.payload = Payload::ReadOk {
                             msgs: self.msgs.lock().await.clone(),
                         };
-                        reply.send(output).await.context("send response message")?;
+                        reply
+                            .send(&self.stdout)
+                            .await
+                            .context("send response message")?;
                     }
                     Payload::ReadOk { .. } => {}
                     Payload::Topology { mut topo } => {
@@ -122,7 +130,10 @@ impl Node<Payload, InjectedPayload> for BroadcastNode {
                             .remove(&self.node)
                             .unwrap_or_else(|| panic!("node {} not found in topology", self.node));
                         reply.body.payload = Payload::TopologyOk;
-                        reply.send(output).await.context("send response message")?;
+                        reply
+                            .send(&self.stdout)
+                            .await
+                            .context("send response message")?;
                     }
                     Payload::TopologyOk => {}
                 }
@@ -146,7 +157,10 @@ impl Node<Payload, InjectedPayload> for BroadcastNode {
                             payload: Payload::Gossip { seen },
                         },
                     };
-                    to_send.send(output).await.context("send gossip message")?;
+                    to_send
+                        .send(&self.stdout)
+                        .await
+                        .context("send gossip message")?;
                 }
             }
         }

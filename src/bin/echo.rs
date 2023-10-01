@@ -4,6 +4,7 @@ use anyhow::{Context, Ok};
 use async_trait::async_trait;
 use gossip_glomers::{event_loop, Event, Init, Node};
 use serde::{Deserialize, Serialize};
+use tokio::sync::Mutex;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "type")]
@@ -15,6 +16,7 @@ enum Payload {
 
 struct EchoNode {
     id: AtomicUsize,
+    stdout: Mutex<tokio::io::Stdout>,
 }
 
 #[async_trait]
@@ -22,18 +24,18 @@ impl Node<Payload> for EchoNode {
     fn from_init(
         _init: Init,
         _tx: tokio::sync::mpsc::Sender<Event<Payload>>,
+        stdout: Mutex<tokio::io::Stdout>,
     ) -> anyhow::Result<Self>
     where
         Self: Sized,
     {
-        Ok(Self { id: 1.into() })
+        Ok(Self {
+            id: 1.into(),
+            stdout,
+        })
     }
 
-    async fn handle(
-        &self,
-        event: gossip_glomers::Event<Payload>,
-        output: &mut tokio::io::Stdout,
-    ) -> anyhow::Result<()> {
+    async fn handle(&self, event: gossip_glomers::Event<Payload>) -> anyhow::Result<()> {
         let gossip_glomers::Event::Message(message) = event else {
             panic!("unexpected event: {:?}", event);
         };
@@ -41,7 +43,10 @@ impl Node<Payload> for EchoNode {
         match reply.body.payload {
             Payload::Echo { echo } => {
                 reply.body.payload = Payload::EchoOk { echo };
-                reply.send(output).await.context("send response message")?;
+                reply
+                    .send(&self.stdout)
+                    .await
+                    .context("send response message")?;
             }
             Payload::EchoOk { .. } => {}
         };

@@ -8,6 +8,8 @@ use async_trait::async_trait;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncBufReadExt;
+use tokio::sync::Mutex;
+use tokio::task::JoinSet;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Message<Payload> {
@@ -38,11 +40,12 @@ impl<Payload> Message<Payload> {
         }
     }
 
-    pub async fn send(&self, out: &mut tokio::io::Stdout) -> anyhow::Result<()>
+    pub async fn send(&self, out: &Mutex<tokio::io::Stdout>) -> anyhow::Result<()>
     where
         Payload: Serialize,
     {
         let raw_msg = serde_json::to_string(self).context("deserialize message")?;
+        let mut out = out.lock().await;
         out.write_all(raw_msg.as_bytes())
             .await
             .context("serialize response message")?;
@@ -72,15 +75,12 @@ pub trait Node<Payload, InjectedPayload = ()>: Sync + Send {
     fn from_init(
         init: Init,
         tx: tokio::sync::mpsc::Sender<Event<Payload, InjectedPayload>>,
+        stdout: Mutex<tokio::io::Stdout>,
     ) -> anyhow::Result<Self>
     where
         Self: Sized;
 
-    async fn handle(
-        &self,
-        event: Event<Payload, InjectedPayload>,
-        output: &mut tokio::io::Stdout,
-    ) -> anyhow::Result<()>;
+    async fn handle(&self, event: Event<Payload, InjectedPayload>) -> anyhow::Result<()>;
 }
 
 #[derive(Debug, Clone)]
@@ -98,7 +98,7 @@ where
 {
     let stdin = tokio::io::stdin();
     let stdin = tokio::io::BufReader::new(stdin);
-    let mut stdout = tokio::io::stdout();
+    let stdout = Mutex::new(tokio::io::stdout());
     let (tx, mut rx) = tokio::sync::mpsc::channel(1);
 
     let init_msg: Message<InitPayload> = serde_json::from_str(
@@ -114,7 +114,6 @@ where
     let InitPayload::Init(init) = init_msg.body.payload else {
         return Err(anyhow::anyhow!("expected init message"));
     };
-    let node = Arc::new(N::from_init(init, tx.clone())?);
 
     let reply = Message {
         src: init_msg.dest,
@@ -125,13 +124,12 @@ where
             payload: InitPayload::InitOk,
         },
     };
+    reply.send(&stdout).await.context("send response to init")?;
 
-    reply
-        .send(&mut stdout)
-        .await
-        .context("send response to init")?;
+    let node = Arc::new(N::from_init(init, tx.clone(), stdout)?);
 
-    let thread = tokio::spawn(async move {
+    let mut join_set = JoinSet::new();
+    join_set.spawn(async move {
         let stdin = tokio::io::stdin();
         let mut stdin = tokio::io::BufReader::new(stdin).lines();
         while let Some(line) = stdin.next_line().await.expect("read line") {
@@ -147,20 +145,16 @@ where
 
     while let Some(event) = rx.recv().await {
         let node_clone = node.clone();
-        tokio::spawn(async move {
-            let mut stdout = tokio::io::stdout();
+        join_set.spawn(async move {
             node_clone
-                .handle(event, &mut stdout)
+                .handle(event)
                 .await
                 .context("failed to handle event")?;
             Ok(())
         });
     }
 
-    thread
-        .await
-        .expect("stdin thread panicked")
-        .context("stdin thread errored")?;
+    while let Some(_) = join_set.join_next().await {}
 
     Ok(())
 }
