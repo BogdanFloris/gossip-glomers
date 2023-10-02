@@ -11,6 +11,8 @@ use tokio::io::AsyncBufReadExt;
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 
+pub mod kv;
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Message<Payload> {
     pub src: String,

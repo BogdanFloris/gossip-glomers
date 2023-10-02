@@ -56,6 +56,7 @@ struct KafkaNode {
     stdout: Mutex<tokio::io::Stdout>,
     rpc: Mutex<HashMap<usize, tokio::sync::oneshot::Sender<Message<Payload>>>>,
 }
+
 impl KafkaNode {
     async fn rpc(&self, to: &String, payload: Payload) -> anyhow::Result<Message<Payload>> {
         let (tx, rx) = tokio::sync::oneshot::channel();
