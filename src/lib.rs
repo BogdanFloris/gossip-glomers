@@ -152,7 +152,7 @@ pub enum Event<Payload, InjectedPayload = ()> {
 pub async fn event_loop<N, P, IP>() -> anyhow::Result<()>
 where
     N: Node<P, IP> + 'static,
-    P: DeserializeOwned + Send + 'static,
+    P: std::fmt::Debug + DeserializeOwned + Send + 'static,
     IP: Send + 'static,
 {
     let stdin = tokio::io::stdin();

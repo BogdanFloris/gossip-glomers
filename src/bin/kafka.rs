@@ -12,7 +12,7 @@ use tokio::sync::Mutex;
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "type")]
 #[serde(rename_all = "snake_case")]
-enum Payload<T> {
+enum Payload {
     Send {
         key: String,
         msg: u64,
@@ -46,16 +46,17 @@ enum Payload<T> {
         key: String,
     },
     ReadOk {
-        value: T,
+        value: u64,
     },
     Write {
         key: String,
-        value: T,
+        value: u64,
     },
+    WriteOk {},
     Cas {
         key: String,
-        from: T,
-        to: T,
+        from: u64,
+        to: u64,
         #[serde(default, rename = "create_if_not_exists")]
         put: bool,
     },
@@ -67,20 +68,16 @@ enum Payload<T> {
 #[serde(rename_all = "snake_case")]
 enum InjectedPayload {}
 
-struct KafkaNode<T> {
+struct KafkaNode {
     id: AtomicUsize,
     node: String,
-    nodes: Vec<String>,
     stdout: Mutex<tokio::io::Stdout>,
     storage: String,
-    rpc: Mutex<HashMap<usize, tokio::sync::oneshot::Sender<Message<Payload<T>>>>>,
+    rpc: Mutex<HashMap<usize, tokio::sync::oneshot::Sender<Message<Payload>>>>,
 }
 
-impl<T> KafkaNode<T>
-where
-    T: Serialize,
-{
-    async fn rpc(&self, to: &String, payload: Payload<T>) -> anyhow::Result<Message<Payload<T>>> {
+impl KafkaNode {
+    async fn rpc(&self, to: &String, payload: Payload) -> anyhow::Result<Message<Payload>> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         let msg = Message {
             src: self.node.clone(),
@@ -98,14 +95,8 @@ where
 }
 
 #[async_trait]
-impl<T> KV<T> for KafkaNode<T>
-where
-    T: Send + Serialize + Sync,
-{
-    async fn read(&self, key: String) -> anyhow::Result<T>
-    where
-        T: Deserialize<'static> + Send,
-    {
+impl KV<u64> for KafkaNode {
+    async fn read(&self, key: String) -> anyhow::Result<u64> {
         let payload = Payload::Read { key };
         let result = self
             .rpc(&self.storage, payload)
@@ -117,10 +108,7 @@ where
         }
     }
 
-    async fn write(&self, key: String, value: T) -> anyhow::Result<()>
-    where
-        T: Serialize + Send,
-    {
+    async fn write(&self, key: String, value: u64) -> anyhow::Result<()> {
         let payload = Payload::Write { key, value };
         let _result = self
             .rpc(&self.storage, payload)
@@ -129,10 +117,7 @@ where
         Ok(())
     }
 
-    async fn cas(&self, key: String, from: T, to: T, put: bool) -> anyhow::Result<()>
-    where
-        T: Serialize + Deserialize<'static> + Send,
-    {
+    async fn cas(&self, key: String, from: u64, to: u64, put: bool) -> anyhow::Result<()> {
         let payload = Payload::Cas { key, from, to, put };
         let _result = self
             .rpc(&self.storage, payload)
@@ -143,13 +128,10 @@ where
 }
 
 #[async_trait]
-impl<T> Node<Payload<T>, InjectedPayload> for KafkaNode<T>
-where
-    T: Send + Serialize + std::fmt::Debug + Sync,
-{
+impl Node<Payload, InjectedPayload> for KafkaNode {
     fn from_init(
         init: Init,
-        _tx: tokio::sync::mpsc::Sender<Event<Payload<T>, InjectedPayload>>,
+        _tx: tokio::sync::mpsc::Sender<Event<Payload, InjectedPayload>>,
         stdout: Mutex<tokio::io::Stdout>,
     ) -> anyhow::Result<Self>
     where
@@ -161,7 +143,6 @@ where
         Ok(Self {
             id,
             node: init.node_id,
-            nodes: init.node_ids,
             stdout,
             storage,
             rpc: Mutex::new(HashMap::new()),
@@ -170,7 +151,7 @@ where
 
     async fn handle(
         &self,
-        event: gossip_glomers::Event<Payload<T>, InjectedPayload>,
+        event: gossip_glomers::Event<Payload, InjectedPayload>,
     ) -> anyhow::Result<()> {
         match event {
             gossip_glomers::Event::EOF => {}
@@ -198,17 +179,12 @@ where
                     }
                     Payload::Send { .. } => {
                         reply.body.payload = Payload::SendOk { offset: 0 };
-                        // Test RPC calls
-                        for node in &self.nodes {
-                            if node != &self.node {
-                                let payload = Payload::Echo {
-                                    msg: format!("hello from {}", self.node),
-                                };
-                                eprintln!("payload: {:?}", payload);
-                                let reply = self.rpc(&node, payload).await?;
-                                eprintln!("reply: {:?}", reply);
-                            }
-                        }
+                        // Test storage
+                        // Write
+                        let _ = self.write(self.node.clone(), 69).await.context("write i32");
+                        // Read
+                        let result = self.read(self.node.clone()).await.context("read i32")?;
+                        eprintln!("read i32: {}", result);
                         reply
                             .send(&self.stdout)
                             .await
@@ -247,6 +223,7 @@ where
                     | Payload::Read { .. }
                     | Payload::ReadOk { .. }
                     | Payload::Write { .. }
+                    | Payload::WriteOk {}
                     | Payload::Cas { .. }
                     | Payload::CasOk {} => {}
                 }
@@ -259,5 +236,5 @@ where
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    event_loop::<KafkaNode<i32>, _, _>().await
+    event_loop::<KafkaNode, _, _>().await
 }
