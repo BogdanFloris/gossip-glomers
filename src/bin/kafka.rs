@@ -3,7 +3,7 @@ use std::{
     sync::atomic::{AtomicUsize, Ordering},
 };
 
-use anyhow::{Context, Ok};
+use anyhow::Context;
 use async_trait::async_trait;
 use gossip_glomers::{event_loop, Body, Event, Init, Message, Node, KV};
 use serde::{Deserialize, Serialize};
@@ -15,48 +15,46 @@ use tokio::sync::Mutex;
 enum Payload {
     Send {
         key: String,
-        msg: u64,
+        msg: i64,
     },
     SendOk {
-        offset: usize,
+        offset: i64,
     },
     Poll {
-        offsets: HashMap<String, usize>,
+        offsets: HashMap<String, i64>,
     },
     PollOk {
-        msgs: HashMap<String, Vec<Vec<u64>>>,
+        msgs: HashMap<String, Vec<Vec<i64>>>,
     },
     CommitOffsets {
-        offsets: HashMap<String, usize>,
+        offsets: HashMap<String, i64>,
     },
     CommitOffsetsOk,
     ListCommittedOffsets {
         keys: Vec<String>,
     },
     ListCommittedOffsetsOk {
-        offsets: HashMap<String, usize>,
-    },
-    Echo {
-        msg: String,
-    },
-    EchoOk {
-        msg: String,
+        offsets: HashMap<String, i64>,
     },
     Read {
         key: String,
     },
     ReadOk {
-        value: u64,
+        value: i64,
+    },
+    Error {
+        code: usize,
+        text: String,
     },
     Write {
         key: String,
-        value: u64,
+        value: i64,
     },
     WriteOk {},
     Cas {
         key: String,
-        from: u64,
-        to: u64,
+        from: i64,
+        to: i64,
         #[serde(default, rename = "create_if_not_exists")]
         put: bool,
     },
@@ -95,8 +93,8 @@ impl KafkaNode {
 }
 
 #[async_trait]
-impl KV<u64> for KafkaNode {
-    async fn read(&self, key: String) -> anyhow::Result<u64> {
+impl KV<i64> for KafkaNode {
+    async fn read(&self, key: String) -> anyhow::Result<i64> {
         let payload = Payload::Read { key };
         let result = self
             .rpc(&self.storage, payload)
@@ -108,7 +106,7 @@ impl KV<u64> for KafkaNode {
         }
     }
 
-    async fn write(&self, key: String, value: u64) -> anyhow::Result<()> {
+    async fn write(&self, key: String, value: i64) -> anyhow::Result<()> {
         let payload = Payload::Write { key, value };
         let _result = self
             .rpc(&self.storage, payload)
@@ -117,13 +115,16 @@ impl KV<u64> for KafkaNode {
         Ok(())
     }
 
-    async fn cas(&self, key: String, from: u64, to: u64, put: bool) -> anyhow::Result<()> {
+    async fn cas(&self, key: String, from: i64, to: i64, put: bool) -> anyhow::Result<()> {
         let payload = Payload::Cas { key, from, to, put };
-        let _result = self
+        let result = self
             .rpc(&self.storage, payload)
             .await
-            .context("cas to storage");
-        Ok(())
+            .context("cas to storage")?;
+        match result.body.payload {
+            Payload::CasOk {} => Ok(()),
+            _ => anyhow::bail!("unexpected payload"),
+        }
     }
 }
 
@@ -149,6 +150,12 @@ impl Node<Payload, InjectedPayload> for KafkaNode {
         })
     }
 
+    /// # Handle incoming messages
+    ///
+    /// We will store the messages and offsets in the following format in the KV store:
+    /// - {key}:{offset} -> {msg}
+    /// - latest:{key} -> {offset}
+    /// - committed:{key} -> {offset}
     async fn handle(
         &self,
         event: gossip_glomers::Event<Payload, InjectedPayload>,
@@ -168,23 +175,43 @@ impl Node<Payload, InjectedPayload> for KafkaNode {
 
                 let mut reply = message.into_reply(Some(&self.id));
                 match reply.body.payload {
-                    Payload::Echo { .. } => {
-                        reply.body.payload = Payload::EchoOk {
-                            msg: format!("copy from {}", self.node),
-                        };
-                        reply
-                            .send(&self.stdout)
+                    Payload::Send { key, msg } => {
+                        // Find the offset
+                        let latest_key = format!("latest:{}", key);
+                        let mut start = match self
+                            .read(latest_key.clone())
                             .await
-                            .context("send echo ok response")?;
-                    }
-                    Payload::Send { .. } => {
-                        reply.body.payload = Payload::SendOk { offset: 0 };
-                        // Test storage
-                        // Write
-                        let _ = self.write(self.node.clone(), 69).await.context("write i32");
-                        // Read
-                        let result = self.read(self.node.clone()).await.context("read i32")?;
-                        eprintln!("read i32: {}", result);
+                            .context("read latest offset")
+                        {
+                            Ok(offset) => offset,
+                            Err(_) => 0,
+                        };
+
+                        loop {
+                            let curr = start.clone();
+                            let (prev, now) = (curr.clone() - 1, curr);
+                            let res = self
+                                .cas(latest_key.clone(), prev, now, true)
+                                .await
+                                .context("cas to find offset");
+                            match res {
+                                Ok(_) => break,
+                                Err(_) => start += 1,
+                            }
+                        }
+
+                        let msg_key = format!("{}:{}", key, start);
+                        let _ = self
+                            .write(msg_key.clone(), msg)
+                            .await
+                            .context("write message");
+
+                        let _ = self
+                            .write(latest_key, start)
+                            .await
+                            .context("write latest offset");
+
+                        reply.body.payload = Payload::SendOk { offset: start };
                         reply
                             .send(&self.stdout)
                             .await
@@ -215,11 +242,13 @@ impl Node<Payload, InjectedPayload> for KafkaNode {
                             .await
                             .context("send list commit offsets ok response")?;
                     }
+                    Payload::Error { code, text } => {
+                        eprintln!("Error {}: {}", code, text);
+                    }
                     Payload::ListCommittedOffsetsOk { .. }
                     | Payload::CommitOffsetsOk
                     | Payload::PollOk { .. }
                     | Payload::SendOk { .. }
-                    | Payload::EchoOk { .. }
                     | Payload::Read { .. }
                     | Payload::ReadOk { .. }
                     | Payload::Write { .. }
