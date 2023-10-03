@@ -9,6 +9,8 @@ use gossip_glomers::{event_loop, Body, Event, Init, Message, Node, KV};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
+const MSG_SIZE: i64 = 5;
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "type")]
 #[serde(rename_all = "snake_case")]
@@ -217,26 +219,55 @@ impl Node<Payload, InjectedPayload> for KafkaNode {
                             .await
                             .context("send send ok response")?;
                     }
-                    Payload::Poll { .. } => {
-                        reply.body.payload = Payload::PollOk {
-                            msgs: HashMap::new(),
-                        };
+                    Payload::Poll { offsets } => {
+                        let mut msgs = HashMap::new();
+                        for (key, offset) in offsets {
+                            let mut msg = Vec::new();
+                            for id in offset..(offset + MSG_SIZE) {
+                                let msg_key = format!("{}:{}", key, id);
+                                let res = self.read(msg_key).await.context("read message");
+                                match res {
+                                    Ok(value) => msg.push(vec![id, value]),
+                                    Err(_) => continue,
+                                };
+                            }
+                            msgs.insert(key, msg);
+                        }
+                        reply.body.payload = Payload::PollOk { msgs };
                         reply
                             .send(&self.stdout)
                             .await
                             .context("send poll ok response")?;
                     }
-                    Payload::CommitOffsets { .. } => {
+                    Payload::CommitOffsets { offsets } => {
+                        for (key, offset) in offsets {
+                            let committed_key = format!("committed:{}", key);
+                            let _ = self
+                                .write(committed_key, offset)
+                                .await
+                                .context("write committed offset");
+                        }
                         reply.body.payload = Payload::CommitOffsetsOk;
                         reply
                             .send(&self.stdout)
                             .await
                             .context("send commit offsets ok response")?;
                     }
-                    Payload::ListCommittedOffsets { .. } => {
-                        reply.body.payload = Payload::ListCommittedOffsetsOk {
-                            offsets: HashMap::new(),
-                        };
+                    Payload::ListCommittedOffsets { keys } => {
+                        let mut offsets = HashMap::new();
+                        for key in keys {
+                            let committed_key = format!("committed:{}", key);
+                            let res = self
+                                .read(committed_key)
+                                .await
+                                .context("read committed offset");
+                            let offset = match res {
+                                Ok(offset) => offset,
+                                Err(_) => 0,
+                            };
+                            offsets.insert(key, offset);
+                        }
+                        reply.body.payload = Payload::ListCommittedOffsetsOk { offsets };
                         reply
                             .send(&self.stdout)
                             .await
