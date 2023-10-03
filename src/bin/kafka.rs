@@ -5,14 +5,14 @@ use std::{
 
 use anyhow::{Context, Ok};
 use async_trait::async_trait;
-use gossip_glomers::{event_loop, Body, Event, Init, Message, Node};
+use gossip_glomers::{event_loop, Body, Event, Init, Message, Node, KV};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "type")]
 #[serde(rename_all = "snake_case")]
-enum Payload {
+enum Payload<T> {
     Send {
         key: String,
         msg: u64,
@@ -42,6 +42,24 @@ enum Payload {
     EchoOk {
         msg: String,
     },
+    Read {
+        key: String,
+    },
+    ReadOk {
+        value: T,
+    },
+    Write {
+        key: String,
+        value: T,
+    },
+    Cas {
+        key: String,
+        from: T,
+        to: T,
+        #[serde(default, rename = "create_if_not_exists")]
+        put: bool,
+    },
+    CasOk {},
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -49,20 +67,24 @@ enum Payload {
 #[serde(rename_all = "snake_case")]
 enum InjectedPayload {}
 
-struct KafkaNode {
+struct KafkaNode<T> {
     id: AtomicUsize,
     node: String,
     nodes: Vec<String>,
     stdout: Mutex<tokio::io::Stdout>,
-    rpc: Mutex<HashMap<usize, tokio::sync::oneshot::Sender<Message<Payload>>>>,
+    storage: String,
+    rpc: Mutex<HashMap<usize, tokio::sync::oneshot::Sender<Message<Payload<T>>>>>,
 }
 
-impl KafkaNode {
-    async fn rpc(&self, to: &String, payload: Payload) -> anyhow::Result<Message<Payload>> {
+impl<T> KafkaNode<T>
+where
+    T: Serialize,
+{
+    async fn rpc(&self, to: &String, payload: Payload<T>) -> anyhow::Result<Message<Payload<T>>> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         let msg = Message {
             src: self.node.clone(),
-            dest: to.to_string(),
+            dest: to.clone(),
             body: Body {
                 id: self.id.fetch_add(1, Ordering::SeqCst).into(),
                 in_reply_to: None,
@@ -76,29 +98,79 @@ impl KafkaNode {
 }
 
 #[async_trait]
-impl Node<Payload, InjectedPayload> for KafkaNode {
+impl<T> KV<T> for KafkaNode<T>
+where
+    T: Send + Serialize + Sync,
+{
+    async fn read(&self, key: String) -> anyhow::Result<T>
+    where
+        T: Deserialize<'static> + Send,
+    {
+        let payload = Payload::Read { key };
+        let result = self
+            .rpc(&self.storage, payload)
+            .await
+            .context("read from storage")?;
+        match result.body.payload {
+            Payload::ReadOk { value } => Ok(value),
+            _ => anyhow::bail!("unexpected payload"),
+        }
+    }
+
+    async fn write(&self, key: String, value: T) -> anyhow::Result<()>
+    where
+        T: Serialize + Send,
+    {
+        let payload = Payload::Write { key, value };
+        let _result = self
+            .rpc(&self.storage, payload)
+            .await
+            .context("write to storage");
+        Ok(())
+    }
+
+    async fn cas(&self, key: String, from: T, to: T, put: bool) -> anyhow::Result<()>
+    where
+        T: Serialize + Deserialize<'static> + Send,
+    {
+        let payload = Payload::Cas { key, from, to, put };
+        let _result = self
+            .rpc(&self.storage, payload)
+            .await
+            .context("cas to storage");
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl<T> Node<Payload<T>, InjectedPayload> for KafkaNode<T>
+where
+    T: Send + Serialize + std::fmt::Debug + Sync,
+{
     fn from_init(
         init: Init,
-        _tx: tokio::sync::mpsc::Sender<Event<Payload, InjectedPayload>>,
+        _tx: tokio::sync::mpsc::Sender<Event<Payload<T>, InjectedPayload>>,
         stdout: Mutex<tokio::io::Stdout>,
     ) -> anyhow::Result<Self>
     where
         Self: Sized,
     {
         let id = AtomicUsize::new(1);
+        let storage = "lin-kv".to_string();
 
         Ok(Self {
             id,
             node: init.node_id,
             nodes: init.node_ids,
             stdout,
+            storage,
             rpc: Mutex::new(HashMap::new()),
         })
     }
 
     async fn handle(
         &self,
-        event: gossip_glomers::Event<Payload, InjectedPayload>,
+        event: gossip_glomers::Event<Payload<T>, InjectedPayload>,
     ) -> anyhow::Result<()> {
         match event {
             gossip_glomers::Event::EOF => {}
@@ -107,7 +179,7 @@ impl Node<Payload, InjectedPayload> for KafkaNode {
                 if message.body.in_reply_to.is_some() {
                     let id = message.body.in_reply_to.unwrap();
                     let tx = self.rpc.lock().await.remove(&id).unwrap();
-                    if let Err(_) = tx.send(message.clone()) {
+                    if let Err(_) = tx.send(message) {
                         anyhow::bail!("rpc response channel closed");
                     }
                     return Ok(());
@@ -171,7 +243,12 @@ impl Node<Payload, InjectedPayload> for KafkaNode {
                     | Payload::CommitOffsetsOk
                     | Payload::PollOk { .. }
                     | Payload::SendOk { .. }
-                    | Payload::EchoOk { .. } => {}
+                    | Payload::EchoOk { .. }
+                    | Payload::Read { .. }
+                    | Payload::ReadOk { .. }
+                    | Payload::Write { .. }
+                    | Payload::Cas { .. }
+                    | Payload::CasOk {} => {}
                 }
             }
             gossip_glomers::Event::Injected(_) => {}
@@ -182,5 +259,5 @@ impl Node<Payload, InjectedPayload> for KafkaNode {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    event_loop::<KafkaNode, _, _>().await
+    event_loop::<KafkaNode<i32>, _, _>().await
 }
