@@ -87,12 +87,12 @@ pub trait Node<Payload, InjectedPayload = ()>: Sync + Send {
 pub trait KV<T>: Send + Sync {
     /// Read returns the value for a given key in the key/value store.
     /// Returns an RPCError error with a KeyDoesNotExist code if the key does not exist.
-    async fn read(&self, key: String) -> anyhow::Result<T>
+    async fn read(&self, storage: &String, key: String) -> anyhow::Result<T>
     where
         T: Deserialize<'static> + Send;
 
     /// Write overwrites the value for a given key in the key/value store.
-    async fn write(&self, key: String, val: T) -> anyhow::Result<()>
+    async fn write(&self, storage: &String, key: String, val: T) -> anyhow::Result<()>
     where
         T: Serialize + Send;
 
@@ -101,7 +101,14 @@ pub trait KV<T>: Send + Sync {
     ///
     /// Returns an RPCError with a code of PreconditionFailed if the previous value
     /// does not match. Return a code of KeyDoesNotExist if the key did not exist.
-    async fn cas(&self, key: String, from: T, to: T, put: bool) -> anyhow::Result<()>
+    async fn cas(
+        &self,
+        storage: &String,
+        key: String,
+        from: T,
+        to: T,
+        put: bool,
+    ) -> anyhow::Result<()>
     where
         T: Serialize + Deserialize<'static> + Send;
 }

@@ -72,7 +72,8 @@ struct KafkaNode {
     id: AtomicUsize,
     node: String,
     stdout: Mutex<tokio::io::Stdout>,
-    storage: String,
+    storage_lin: String,
+    storage_seq: String,
     rpc: Mutex<HashMap<usize, tokio::sync::oneshot::Sender<Message<Payload>>>>,
 }
 
@@ -96,10 +97,10 @@ impl KafkaNode {
 
 #[async_trait]
 impl KV<i64> for KafkaNode {
-    async fn read(&self, key: String) -> anyhow::Result<i64> {
+    async fn read(&self, storage: &String, key: String) -> anyhow::Result<i64> {
         let payload = Payload::Read { key };
         let result = self
-            .rpc(&self.storage, payload)
+            .rpc(storage, payload)
             .await
             .context("read from storage")?;
         match result.body.payload {
@@ -108,21 +109,22 @@ impl KV<i64> for KafkaNode {
         }
     }
 
-    async fn write(&self, key: String, value: i64) -> anyhow::Result<()> {
+    async fn write(&self, storage: &String, key: String, value: i64) -> anyhow::Result<()> {
         let payload = Payload::Write { key, value };
-        let _result = self
-            .rpc(&self.storage, payload)
-            .await
-            .context("write to storage");
+        let _result = self.rpc(storage, payload).await.context("write to storage");
         Ok(())
     }
 
-    async fn cas(&self, key: String, from: i64, to: i64, put: bool) -> anyhow::Result<()> {
+    async fn cas(
+        &self,
+        storage: &String,
+        key: String,
+        from: i64,
+        to: i64,
+        put: bool,
+    ) -> anyhow::Result<()> {
         let payload = Payload::Cas { key, from, to, put };
-        let result = self
-            .rpc(&self.storage, payload)
-            .await
-            .context("cas to storage")?;
+        let result = self.rpc(storage, payload).await.context("cas to storage")?;
         match result.body.payload {
             Payload::CasOk {} => Ok(()),
             _ => anyhow::bail!("unexpected payload"),
@@ -141,13 +143,15 @@ impl Node<Payload, InjectedPayload> for KafkaNode {
         Self: Sized,
     {
         let id = AtomicUsize::new(1);
-        let storage = "lin-kv".to_string();
+        let storage_lin = "lin-kv".to_string();
+        let storage_seq = "seq-kv".to_string();
 
         Ok(Self {
             id,
             node: init.node_id,
             stdout,
-            storage,
+            storage_lin,
+            storage_seq,
             rpc: Mutex::new(HashMap::new()),
         })
     }
@@ -181,7 +185,7 @@ impl Node<Payload, InjectedPayload> for KafkaNode {
                         // Find the offset
                         let latest_key = format!("latest:{}", key);
                         let mut start = match self
-                            .read(latest_key.clone())
+                            .read(&self.storage_lin, latest_key.clone())
                             .await
                             .context("read latest offset")
                         {
@@ -193,7 +197,7 @@ impl Node<Payload, InjectedPayload> for KafkaNode {
                             let curr = start.clone();
                             let (prev, now) = (curr.clone() - 1, curr);
                             let res = self
-                                .cas(latest_key.clone(), prev, now, true)
+                                .cas(&self.storage_lin, latest_key.clone(), prev, now, true)
                                 .await
                                 .context("cas to find offset");
                             match res {
@@ -204,12 +208,12 @@ impl Node<Payload, InjectedPayload> for KafkaNode {
 
                         let msg_key = format!("{}:{}", key, start);
                         let _ = self
-                            .write(msg_key.clone(), msg)
+                            .write(&self.storage_seq, msg_key.clone(), msg)
                             .await
                             .context("write message");
 
                         let _ = self
-                            .write(latest_key, start)
+                            .write(&self.storage_seq, latest_key, start)
                             .await
                             .context("write latest offset");
 
@@ -225,7 +229,10 @@ impl Node<Payload, InjectedPayload> for KafkaNode {
                             let mut msg = Vec::new();
                             for id in offset..(offset + MSG_SIZE) {
                                 let msg_key = format!("{}:{}", key, id);
-                                let res = self.read(msg_key).await.context("read message");
+                                let res = self
+                                    .read(&self.storage_seq, msg_key)
+                                    .await
+                                    .context("read message");
                                 match res {
                                     Ok(value) => msg.push(vec![id, value]),
                                     Err(_) => continue,
@@ -243,7 +250,7 @@ impl Node<Payload, InjectedPayload> for KafkaNode {
                         for (key, offset) in offsets {
                             let committed_key = format!("committed:{}", key);
                             let _ = self
-                                .write(committed_key, offset)
+                                .write(&self.storage_seq, committed_key, offset)
                                 .await
                                 .context("write committed offset");
                         }
@@ -258,7 +265,7 @@ impl Node<Payload, InjectedPayload> for KafkaNode {
                         for key in keys {
                             let committed_key = format!("committed:{}", key);
                             let res = self
-                                .read(committed_key)
+                                .read(&self.storage_seq, committed_key)
                                 .await
                                 .context("read committed offset");
                             let offset = match res {
