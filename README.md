@@ -1,4 +1,4 @@
-# gossip-gloomers
+# gossip-glomers
 
 Implementation of the distributed systems challenges from [Fly.io](https://fly.io/dist-sys/).
 
